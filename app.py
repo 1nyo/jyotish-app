@@ -17,6 +17,13 @@ from datetime import date
 st.set_page_config(page_title="AI Jyotish Data Generator", layout="wide")
 st.title("🌌 AI専用ヴェーダ占星術データ抽出（JH互換 Varga）")
 
+import os
+from pathlib import Path
+
+st.caption(f"cwd={os.getcwd()}")
+st.caption(f"exists(third_party)={Path('third_party').exists()}")
+st.caption(f"exists(mod)={Path('third_party/jyotishyamitra/mod_divisional.py').exists()}")
+
 # ------------------------------------------------------------
 # 外部 Varga エンジン（jyotishyamitra）読み込み（パッケージ→直読みの順で試行）
 # ------------------------------------------------------------
