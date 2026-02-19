@@ -25,7 +25,7 @@ NAK_NAMES = [
     "Purva Bhadrapada","Uttara Bhadrapada","Revati"
 ]
 
-# 短縮表記（例に合わせて "Sata" / "UBha" を採用）
+# 短縮表記（例: "Sata" / "UBha"）
 NAK_ABBR = {
     "Ashwini":"Ashw","Bharani":"Bhar","Krittika":"Krit","Rohini":"Rohi","Mrigashira":"Mri",
     "Ardra":"Ardr","Punarvasu":"Puna","Pushya":"Push","Ashlesha":"Ashl","Magha":"Magh",
@@ -36,22 +36,20 @@ NAK_ABBR = {
 }
 
 def map_gender_to_en(g):
-    if g == "男性":
-        return "male"
-    if g == "女性":
-        return "female"
+    if g == "男性": return "male"
+    if g == "女性": return "female"
     return "unknown"
 
-# ---- ナクシャトラ算出（名前・Pada） ----
+# ---- ナクシャトラ算出（名称・Pada） ----
 def compute_nakshatra(lon_deg: float):
     """
     lon_deg: 恒星帯の黄経（度, 0-360）
-    返り値: (nak_name, pada[1..4])
+    戻り値: (nak_name, pada[1..4])
     """
     lon = lon_deg % 360.0
-    unit = 360.0 / 27.0  # 13.3333...°
-    idx = int(lon // unit)  # 0..26
-    pada = int(((lon % unit) // (unit / 4.0))) + 1  # 1..4
+    unit = 360.0 / 27.0  # 13.333...°
+    idx = int(lon // unit)                   # 0..26
+    pada = int(((lon % unit) // (unit/4.0))) + 1  # 1..4
     return NAK_NAMES[idx], pada
 
 def format_nak_abbr(nak_name: str, pada: int) -> str:
@@ -62,37 +60,31 @@ def format_nak_abbr(nak_name: str, pada: int) -> str:
 # ------------------------------------------------------------
 # Varga 計算
 #   - 角度は小数点2桁
-#   - Asc を先頭に出力（asc_first=True）
-#   - D1 のみ：速度（Speed, deg/day）とナクシャトラ（形式トグル）を付与
-#   - ★ 速度を取得するため calc_ut のフラグに FLG_SPEED を付与
+#   - Asc は tropical→sidereal へ変換（ayanamsha を減算）してから出力
+#   - 各チャートで Asc を先頭に出力（asc_first=True）
+#   - D1 のみ：速度（Speed, deg/day, 小数点3桁）とナクシャトラ（形式トグル）を付与
+#   - 惑星速度取得のため calc_ut flags に FLG_SPEED を付与
 # ------------------------------------------------------------
 def get_varga_data(
     jd, varga_factor, is_true_node, lat, lon,
     compact_planet=False, short_sd_keys=False,
     include_speed=False, include_nakshatra=False,
-    nak_single=False,   # True: 'nak' フィールド（短縮＋pada連結）
+    nak_single=False,   # True: 'nak' フィールド（短縮＋pada連結）, False: Nakshatra/Pada 別キー
     asc_first=True
 ):
-    """
-    compact_planet=True  -> 惑星キー短縮（Sun->Su）＆サイン3文字（Ari...）
-    short_sd_keys=True   -> 'Sign','Degree' を 'sg','deg' に短縮
-    include_speed        -> 速度を出力（deg/day, D1 用）
-    include_nakshatra    -> ナクシャトラ名・Pada を出力（D1 用）
-    nak_single           -> 'nak' フィールド（短縮＋pada連結）で出力
-    asc_first            -> Asc を先頭に出力
-    """
     key_sign = "sg" if short_sd_keys else "Sign"
     key_deg  = "deg" if short_sd_keys else "Degree"
-
     signs = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo",
              "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
 
     out = {}
 
-    # ---- Ascendant（先頭出力のため先に計算）----
-    res_asc, _ = swe.houses_ex(jd, lat, lon, b'P')  # Placidus
-    asc_lon_sid = res_asc[0] % 360.0
-    asc_vlon    = (asc_lon_sid * varga_factor) % 360.0
+    # ---- Ascendant（先頭出力用） ----
+    cusps, ascmc = swe.houses_ex(jd, lat, lon, b'P')  # tropical Asc
+    asc_trop = ascmc[0] % 360.0
+    ayan = swe.get_ayanamsa_ut(jd)                    # ayanamsha
+    asc_sid = (asc_trop - ayan) % 360.0               # ← sidereal Asc に変換
+    asc_vlon = (asc_sid * varga_factor) % 360.0
     aidx = int(asc_vlon // 30.0)
     adeg = round(asc_vlon % 30.0, 2)
     asign = SIG_ABBR[aidx] if compact_planet else signs[aidx]
@@ -100,7 +92,7 @@ def get_varga_data(
 
     asc_obj = {key_sign: asign, key_deg: adeg}
     if include_nakshatra:
-        nk_name_a, nk_pada_a = compute_nakshatra(asc_lon_sid)
+        nk_name_a, nk_pada_a = compute_nakshatra(asc_sid)
         if nak_single:
             asc_obj["nak"] = format_nak_abbr(nk_name_a, nk_pada_a)
         else:
@@ -118,14 +110,13 @@ def get_varga_data(
     }
     planets["Rahu"] = swe.TRUE_NODE if is_true_node else swe.MEAN_NODE
 
-    # ★ 速度を得るための flags
-    flags = swe.FLG_SIDEREAL | swe.FLG_SPEED
+    flags = swe.FLG_SIDEREAL | swe.FLG_SPEED  # ← 速度取得のため
 
     # ---- 各天体 ----
     for name, pid in planets.items():
         res, _ = swe.calc_ut(jd, pid, flags)
-        lon_sid = res[0] % 360.0     # D1 恒星黄経（nak 算出基準）
-        spd     = res[3]             # ★ deg/day（丸めなし）
+        lon_sid = res[0] % 360.0         # D1 の恒星黄経（nak 算出用）
+        spd     = res[3]                 # deg/day
 
         vlon = (lon_sid * varga_factor) % 360.0
         sidx = int(vlon // 30.0)
@@ -137,8 +128,7 @@ def get_varga_data(
         base = {key_sign: sign_out, key_deg: deg}
 
         if include_speed:
-            # ★ 丸め禁止：そのまま出力（JSONの浮動小数表現に委ねる）
-            base["Speed"] = spd
+            base["Speed"] = round(spd, 3)  # ← 小数点3桁
 
         if include_nakshatra:
             nk_name, nk_pada = compute_nakshatra(lon_sid)
@@ -161,7 +151,7 @@ def get_varga_data(
 
             base_k = {key_sign: ksign, key_deg: kdeg}
             if include_speed:
-                base_k["Speed"] = None  # Ketu の速度は None（モデル化しない）
+                base_k["Speed"] = None  # Ketu 速度は None
 
             if include_nakshatra:
                 nk_name_k, nk_pada_k = compute_nakshatra(k_lon_sid)
@@ -241,7 +231,7 @@ with st.expander("クリックで展開", expanded=False):
         )
         minify_json = st.checkbox("JSONを最小化（スペース・改行なし）", value=True)
 
-        # D1 専用：ナクシャトラ出力トグル
+        # D1 専用：ナクシャトラ 'nak' 形式トグル
         use_nak_single = st.checkbox(
             "D1のナクシャトラを短縮 'nak'（例: Sata-3 / UBha-3）で出力", value=True
         )
@@ -271,14 +261,10 @@ with st.expander("クリックで展開", expanded=False):
 # ------------------------------------------------------------
 if st.button("AI解析用データを生成", type="primary"):
 
+    # 恒星帯：Lahiri
     swe.set_sid_mode(swe.SIDM_LAHIRI)
 
-    def _map_gender_to_en(g):
-        if g == "男性": return "male"
-        if g == "女性": return "female"
-        return "unknown"
-
-    gender_ai = _map_gender_to_en(gender)
+    gender_ai = map_gender_to_en(gender)
 
     # ローカル時刻 → UT
     hour_local = h + m/60 + s/3600
@@ -287,7 +273,7 @@ if st.button("AI解析用データを生成", type="primary"):
 
     charts = {}
 
-    # --- D1: 速度（丸めなし）＆ナクシャトラ（Asc 先頭） ---
+    # --- D1: 速度(3桁)＆ナクシャトラ（Asc 先頭） ---
     if d1:
         charts["D1_Rashi"] = get_varga_data(
             jd, 1, is_true_node, lat, lon,
@@ -305,99 +291,77 @@ if st.button("AI解析用データを生成", type="primary"):
             jd, 9, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d3:
         charts["D3_Drekkana"] = get_varga_data(
             jd, 3, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d4:
         charts["D4_Chaturthamsa"] = get_varga_data(
             jd, 4, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d7:
         charts["D7_Saptamsa"] = get_varga_data(
             jd, 7, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d10:
         charts["D10_Dasamsa"] = get_varga_data(
             jd, 10, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d12:
         charts["D12_Dwadasamsa"] = get_varga_data(
             jd, 12, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d16:
         charts["D16_Shodasamsa"] = get_varga_data(
             jd, 16, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d20:
         charts["D20_Vimsamsa"] = get_varga_data(
             jd, 20, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d24:
         charts["D24_Chaturvimsamsa"] = get_varga_data(
             jd, 24, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d30:
         charts["D30_Trimsamsa"] = get_varga_data(
             jd, 30, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
     if d60:
         charts["D60_Shashtyamsa"] = get_varga_data(
             jd, 60, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False,
-            include_nakshatra=False,
-            asc_first=True
+            include_speed=False, include_nakshatra=False, asc_first=True
         )
 
     node_value_for_json = "True" if is_true_node else "Mean"
@@ -418,8 +382,8 @@ if st.button("AI解析用データを生成", type="primary"):
         "Charts": charts
     }
 
-    # JSON 出力
     json_str = to_json(final_output, minify=minify_json)
+
     st.divider()
     st.code(json_str, language="json")
 
