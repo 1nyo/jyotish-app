@@ -27,17 +27,17 @@ import sys
 HAS_JM = False
 dv = None
 
-# ① パッケージ読み込み（標準ルート）
+# ① パッケージ読み込みを試す
 try:
     from third_party.jyotishyamitra import mod_divisional as dv
     HAS_JM = True
 except Exception:
     HAS_JM = False
 
-# ② パッケージNGなら、app.pyの場所からの絶対パスで直読み
+# ② 失敗時：app.py の場所から絶対パス指定で直読み
 if not HAS_JM:
     try:
-        base_dir = Path(__file__).resolve().parent  # app.py が置かれているディレクトリ
+        base_dir = Path(__file__).resolve().parent  # app.py があるディレクトリ
         mod_path = base_dir / "third_party" / "jyotishyamitra" / "mod_divisional.py"
         if mod_path.exists():
             spec = importlib.util.spec_from_file_location("jm_mod_divisional", str(mod_path))
@@ -48,7 +48,7 @@ if not HAS_JM:
     except Exception:
         HAS_JM = False
 
-# デバッグ表示（本番で気になる場合はコメントアウト可）
+# デバッグ表示（成否とどこから読んだかが分かる）
 if HAS_JM and dv is not None:
     st.caption(f"[JM] loaded: {getattr(dv, '__file__', 'unknown')}")
 else:
