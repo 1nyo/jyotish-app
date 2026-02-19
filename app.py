@@ -18,16 +18,41 @@ st.set_page_config(page_title="AI Jyotish Data Generator", layout="wide")
 st.title("🌌 AI専用ヴェーダ占星術データ抽出（JH互換 Varga）")
 
 # ------------------------------------------------------------
-# 外部 Varga エンジン（jyotishyamitra）読み込み
+# 外部 Varga エンジン（jyotishyamitra）読み込み（パッケージ→直読みの順で試行）
 # ------------------------------------------------------------
+import importlib.util
+from pathlib import Path
+import sys
+
 HAS_JM = False
 dv = None
+
+# ① パッケージ読み込み（標準ルート）
 try:
-    # ファイル名は固定：third_party/jyotishyamitra/mod_divisional.py
     from third_party.jyotishyamitra import mod_divisional as dv
     HAS_JM = True
-except ImportError:
+except Exception:
     HAS_JM = False
+
+# ② パッケージNGなら、app.pyの場所からの絶対パスで直読み
+if not HAS_JM:
+    try:
+        base_dir = Path(__file__).resolve().parent  # app.py が置かれているディレクトリ
+        mod_path = base_dir / "third_party" / "jyotishyamitra" / "mod_divisional.py"
+        if mod_path.exists():
+            spec = importlib.util.spec_from_file_location("jm_mod_divisional", str(mod_path))
+            dv = importlib.util.module_from_spec(spec)  # type: ignore
+            assert spec and spec.loader
+            spec.loader.exec_module(dv)  # type: ignore
+            HAS_JM = True
+    except Exception:
+        HAS_JM = False
+
+# デバッグ表示（本番で気になる場合はコメントアウト可）
+if HAS_JM and dv is not None:
+    st.caption(f"[JM] loaded: {getattr(dv, '__file__', 'unknown')}")
+else:
+    st.caption("[JM] NOT loaded (fallback mode)")
 
 # ------------------------------------------------------------
 # 惑星キー短縮・サイン略号
