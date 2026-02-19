@@ -1,31 +1,84 @@
+# app.py — AI専用ヴェーダ占星術データ抽出（JH互換 Varga エンジン統合版）
+# - 都市検索なし / 緯度・経度・UTCは手入力（1行）
+# - 出生日・出生時刻（時/分/秒）は1行
+# - D1のみ：Speed(度/日・小数点3桁) と ナクシャトラ（nak 形式トグル）を付与
+# - Sign/Degree → sg/deg のキー短縮トグル、惑星キー・サイン略号のトグル
+# - Varga計算は third_party/jyotishyamitra/mod_divisional.py を最優先（JH互換）
+# - フォールバック計算も内蔵（非常用）
+
 import streamlit as st
 import swisseph as swe
 import json
 from datetime import date
 
 # ------------------------------------------------------------
-# 基本設定
+# ページ設定
 # ------------------------------------------------------------
 st.set_page_config(page_title="AI Jyotish Data Generator", layout="wide")
-st.title("🌌 AI専用ヴェーダ占星術データ抽出")
+st.title("🌌 AI専用ヴェーダ占星術データ抽出（JH互換 Varga）")
 
+# ------------------------------------------------------------
+# 外部 Varga エンジン（jyotishyamitra）読み込み
+# ------------------------------------------------------------
+HAS_JM = False
+dv = None
+try:
+    # ファイル名は固定：third_party/jyotishyamitra/mod_divisional.py
+    from third_party.jyotishyamitra import mod_divisional as dv
+    HAS_JM = True
+except ImportError:
+    HAS_JM = False
+
+# ------------------------------------------------------------
 # 惑星キー短縮・サイン略号
+# ------------------------------------------------------------
 PLANET_ABBR = {
     "Sun": "Su", "Moon": "Mo", "Mars": "Ma", "Mercury": "Me",
     "Jupiter": "Ju", "Venus": "Ve", "Saturn": "Sa",
     "Rahu": "Ra", "Ketu": "Ke", "Ascendant": "Asc"
 }
+
+SIG_FULL = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo",
+            "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
 SIG_ABBR = ["Ari","Tau","Gem","Can","Leo","Vir","Lib","Sco","Sag","Cap","Aqu","Pis"]
 
-# 27 Nakshatras（0°Aries=Ashwini）
+_SIG_INDEX = {name.lower(): i for i, name in enumerate(SIG_FULL)}
+_SIG_INDEX.update({abbr.lower(): i for i, abbr in enumerate(SIG_ABBR)})
+
+def normalize_sign_to_index(sign):
+    """sign が 0..11 / 1..12 / 'Aries' / 'Ari' 等どれで来ても 0..11 に正規化"""
+    if isinstance(sign, int):
+        if 0 <= sign <= 11:
+            return sign
+        if 1 <= sign <= 12:
+            return sign - 1
+    if isinstance(sign, str):
+        key = sign.strip().lower()
+        return _SIG_INDEX.get(key, None)
+    return None
+
+def deg_to_2dec(x):  # 角度は 2 桁
+    return round(float(x), 2)
+
+def spd_to_3dec(x):  # Speed は 3 桁
+    return round(float(x), 3)
+
+def map_gender_to_en(g):
+    if g == "男性": return "male"
+    if g == "女性": return "female"
+    return "unknown"
+
+# ------------------------------------------------------------
+# ナクシャトラ（D1のみ）
+# ------------------------------------------------------------
 NAK_NAMES = [
     "Ashwini","Bharani","Krittika","Rohini","Mrigashira","Ardra","Punarvasu","Pushya","Ashlesha",
     "Magha","Purva Phalguni","Uttara Phalguni","Hasta","Chitra","Swati","Vishakha","Anuradha","Jyeshtha",
-    "Mula","Purva Ashadha","Uttara Ashadha","Shravana","Dhanishta","Shatabhisha",
-    "Purva Bhadrapada","Uttara Bhadrapada","Revati"
+    "Mula","Purva Ashadha","Uttara Ashadha","Shravana","Dhanishta","Shatabhisha","Purva Bhadrapada",
+    "Uttara Bhadrapada","Revati"
 ]
 
-# 短縮表記（例: "Sata" / "UBha"）
+# 短縮表記（例：「Sata-3」/「UBha-2」）
 NAK_ABBR = {
     "Ashwini":"Ashw","Bharani":"Bhar","Krittika":"Krit","Rohini":"Rohi","Mrigashira":"Mri",
     "Ardra":"Ardr","Punarvasu":"Puna","Pushya":"Push","Ashlesha":"Ashl","Magha":"Magh",
@@ -35,12 +88,6 @@ NAK_ABBR = {
     "Purva Bhadrapada":"PBha","Uttara Bhadrapada":"UBha","Revati":"Reva"
 }
 
-def map_gender_to_en(g):
-    if g == "男性": return "male"
-    if g == "女性": return "female"
-    return "unknown"
-
-# ---- ナクシャトラ算出（名称・Pada） ----
 def compute_nakshatra(lon_deg: float):
     """
     lon_deg: 恒星帯の黄経（度, 0-360）
@@ -48,169 +95,108 @@ def compute_nakshatra(lon_deg: float):
     """
     lon = lon_deg % 360.0
     unit = 360.0 / 27.0  # 13.333...°
-    idx = int(lon // unit)                   # 0..26
-    pada = int(((lon % unit) // (unit/4.0))) + 1  # 1..4
+    idx = int(lon // unit)  # 0..26
+    pada = int(((lon % unit) // (unit / 4.0))) + 1  # 1..4
     return NAK_NAMES[idx], pada
 
 def format_nak_abbr(nak_name: str, pada: int) -> str:
-    """短縮 'nak' 形式（例：'Sata-3' / 'UBha-3'）"""
     abbr = NAK_ABBR.get(nak_name, nak_name[:4])
     return f"{abbr}-{pada}"
 
 # ------------------------------------------------------------
-# Varga 計算
-#   - 角度は小数点2桁
-#   - Asc は tropical→sidereal へ変換（ayanamsha を減算）してから出力
-#   - 各チャートで Asc を先頭に出力（asc_first=True）
-#   - D1 のみ：速度（Speed, deg/day, 小数点3桁）とナクシャトラ（形式トグル）を付与
-#   - 惑星速度取得のため calc_ut flags に FLG_SPEED を付与
+# jyotishyamitra（mod_divisional）のアダプタ
 # ------------------------------------------------------------
-# ====== ここから計算ユーティリティ（補助関数） ======
+def _jm_map_varga(lon_sid: float, varga_n: int):
+    """
+    sidereal 黄経 lon_sid → (sign_index 0..11, degree_in_sign 0..30) を返す。
+    - third_party/jyotishyamitra/mod_divisional.py の get_divisional_sign_and_degree を使用
+    - 失敗時は None（＝フォールバック使用）
+    """
+    if not HAS_JM or dv is None:
+        return None
+    try:
+        if hasattr(dv, "get_divisional_sign_and_degree"):
+            out = dv.get_divisional_sign_and_degree(lon_sid, varga_n)
+            # 期待形式: (sign, deg) — sign は 0..11 / 1..12 / 'Aries' / 'Ari' のいずれか
+            if isinstance(out, (tuple, list)) and len(out) >= 2:
+                s_idx = normalize_sign_to_index(out[0])
+                if s_idx is None and isinstance(out[0], (int, float)):
+                    s_idx = normalize_sign_to_index(int(out[0]))
+                if s_idx is None:
+                    return None
+                return s_idx, float(out[1])
+    except Exception:
+        return None
+    return None
 
-def _sign_index(lon_sid):  # 0..11
-    return int((lon_sid % 360.0) // 30.0)
+# ------------------------------------------------------------
+# フォールバック（JMが使えない場合の保険）
+# ------------------------------------------------------------
+def _fallback_varga_mapping(lon_sid: float, varga_n: int):
+    """
+    JM が使えない場合の簡易マッピング。
+    D9/D10/D20 の起点規則、D30 の不等分（5/5/8/7/5）だけは押さえ、
+    他は等分×同サイン起点の素直な割当（安全側の簡易）。
+    戻り値: (sign_index 0..11, degree_in_sign[0..30))
+    """
+    base = int((lon_sid % 360.0) // 30.0)
+    xdeg = (lon_sid % 30.0)
 
-def _deg_in_sign(lon_sid):  # 0..30
-    return (lon_sid % 30.0)
+    def d_equal(seg, start_add=0):
+        k = int(xdeg // seg)
+        s = (base + start_add + k) % 12
+        deg30 = (lon_sid * (30.0/seg)) % 30.0
+        return s, deg30
 
-def _scale_deg_to_30(within_deg, seg_size):
-    """区画内の [0..seg_size) を [0..30) に線形拡大（不等分割D30向け）"""
-    return (within_deg / seg_size) * 30.0
+    # D9: 可動=同, 固定=9th, 双体=5th
+    if varga_n == 9:
+        modality = base % 3
+        start_add = {0:0,1:8,2:4}[modality]
+        return d_equal(30.0/9.0, start_add)
 
-# --- D3 Drekkana（等分）: 10°×3、割当は 1st=同サイン, 2nd=5th, 3rd=9th ---
-def varga_pos_d3(lon_sid):
-    base = _sign_index(lon_sid)
-    deg  = _deg_in_sign(lon_sid)
-    k = int(deg // 10.0)  # 0,1,2
-    to_add = [0, 4, 8][k]  # +0,+4,+8
-    sign = (base + to_add) % 12
-    deg30 = ((lon_sid * 3.0) % 30.0)  # 等分は倍角でOK
-    return sign, deg30
+    # D10: 奇数=同 / 偶数=9th（index 偶数を奇数サインとみなす実装）
+    if varga_n == 10:
+        start_add = 0 if (base % 2 == 0) else 8
+        return d_equal(3.0, start_add)
 
-# --- D9 Navamsa（等分）: 3°20′×9、起点= 可動:同/ 不動:9th/ 双体:5th ---
-def varga_pos_d9(lon_sid):
-    base = _sign_index(lon_sid)
-    deg  = _deg_in_sign(lon_sid)
-    seg  = 30.0/9.0  # 3.333...
-    k = int(deg // seg)  # 0..8
-    modality = base % 3  # 可動0, 固定1, 双体2 （Ar=0, Ta=1, Ge=2, ...）
-    start_add = {0:0, 1:8, 2:4}[modality]  # 同/9th/5th
-    sign = (base + start_add + k) % 12
-    deg30 = ((lon_sid * 9.0) % 30.0)
-    return sign, deg30
+    # D20: 可動=Ar, 固定=Sag, 双体=Leo 起点
+    if varga_n == 20:
+        k = int(xdeg // (30.0/20.0))
+        starts = {0:0,1:8,2:4}
+        modality = base % 3
+        s = (starts[modality] + k) % 12
+        deg30 = (lon_sid * 20.0) % 30.0
+        return s, deg30
 
-# --- D10 Dashamsa（等分）: 3°×10、起点= 奇数:同/ 偶数:9th ---
-def varga_pos_d10(lon_sid):
-    base = _sign_index(lon_sid)
-    deg  = _deg_in_sign(lon_sid)
-    seg  = 3.0
-    k = int(deg // seg)  # 0..9
-    start_add = 0 if (base % 2 == 0) else 8  # base=0:Aries(奇数サイン)→同, 1:Taurus(偶数)→9th
-    # 注意: ここでは 0=Aries を奇数扱いにしています（0,2,4..が奇数サイン）
-    # 12サインの配列上、index偶数=奇数サインという実装表現です
-    sign = (base + start_add + k) % 12
-    deg30 = ((lon_sid * 10.0) % 30.0)
-    return sign, deg30
+    # D30: 不等分（奇数=5,5,8,7,5 / 偶数=5,7,8,5,5）
+    if varga_n == 30:
+        odd_sizes  = [5.0, 5.0, 8.0, 7.0, 5.0]
+        even_sizes = [5.0, 7.0, 8.0, 5.0, 5.0]
+        sizes = odd_sizes if (base % 2 == 0) else even_sizes
+        acc = 0.0
+        idx = 0
+        for i, w in enumerate(sizes):
+            if xdeg < acc + w:
+                idx = i
+                break
+            acc += w
+        s = (base + idx) % 12
+        within = xdeg - sum(sizes[:idx])
+        deg30 = (within / sizes[idx]) * 30.0
+        return s, deg30
 
-# --- D12 Dwadasamsa（等分）: 2.5°×12、起点=同サイン ---
-def varga_pos_d12(lon_sid):
-    base = _sign_index(lon_sid)
-    deg30 = ((lon_sid * 12.0) % 30.0)
-    # 2.5°ごとにサインが1つ進む → 倍角でOK（起点=同）
-    add = int((_deg_in_sign(lon_sid)) // (30.0/12.0))
-    sign = (base + add) % 12
-    return sign, deg30
+    # D12/D16/D24/D60/D3/D4/D7 などは等分×同サイン起点
+    if varga_n in (12, 16, 24, 60, 3, 4, 7):
+        seg = 30.0 / float(varga_n)
+        return d_equal(seg, 0)
 
-# --- D16 Shodasamsa（等分）: 1°52'30"×16、起点規則（一般的実装）=奇数:同/ 偶数:9th ---
-def varga_pos_d16(lon_sid):
-    base = _sign_index(lon_sid)
-    seg  = 30.0/16.0
-    k = int(_deg_in_sign(lon_sid) // seg)
-    start_add = 0 if (base % 2 == 0) else 8
-    sign = (base + start_add + k) % 12
-    deg30 = ((lon_sid * 16.0) % 30.0)
-    return sign, deg30
-
-# --- D20 Vimsamsa（等分）: 1°30′×20、起点= 可動:Ar/ 固定:Sag/ 双体:Leo ---
-def varga_pos_d20(lon_sid):
-    base = _sign_index(lon_sid)
-    seg  = 30.0/20.0
-    k = int(_deg_in_sign(lon_sid) // seg)  # 0..19
-    modality = base % 3  # 可動0/固定1/双体2
-    starts = {0:0, 1:8, 2:4}  # Aries/Sag/Leo 起点 → baseからのオフセット
-    sign = (starts[modality] + k) % 12
-    deg30 = ((lon_sid * 20.0) % 30.0)
-    return sign, deg30
-
-# --- D24 Chaturvimsamsa（等分）: 1°15′×24、（簡易）奇数:同/ 偶数:9th 起点
-def varga_pos_d24(lon_sid):
-    base = _sign_index(lon_sid)
-    seg  = 30.0/24.0
-    k = int(_deg_in_sign(lon_sid) // seg)
-    start_add = 0 if (base % 2 == 0) else 8
-    sign = (base + start_add + k) % 12
-    deg30 = ((lon_sid * 24.0) % 30.0)
-    return sign, deg30
-
-# --- D30 Trimsamsa（不等分）: 奇数サイン=5/5/8/7/5°, 偶数サイン=5/5/8/7/5°（順序逆）
-def varga_pos_d30(lon_sid):
-    base = _sign_index(lon_sid)
-    deg  = _deg_in_sign(lon_sid)
-    # 区画サイズ（度）と割当サインの進み方（奇偶で反転）
-    odd_sizes  = [5.0, 5.0, 8.0, 7.0, 5.0]   # 奇数サイン
-    even_sizes = [5.0, 7.0, 8.0, 5.0, 5.0]   # 偶数サイン（多くの流派で奇数の逆順を採用）
-    sizes = odd_sizes if (base % 2 == 0) else even_sizes
-    # どの区画に入るかを決める
-    acc = 0.0
-    idx = 0
-    for i, w in enumerate(sizes):
-        if deg < acc + w:
-            idx = i
-            break
-        acc += w
-    # 区画 idx ぶんサインを進める
-    sign = (base + idx) % 12
-    # 区画内の位置を 0..30° にスケール
-    within = deg - sum(sizes[:idx])
-    deg30 = _scale_deg_to_30(within, sizes[idx])
-    return sign, deg30
-
-# --- D60 Shashtiamsa（等分）: 0.5°×60、（簡易）起点=同サイン
-def varga_pos_d60(lon_sid):
-    base = _sign_index(lon_sid)
-    seg  = 30.0/60.0  # 0.5°
-    k = int(_deg_in_sign(lon_sid) // seg)  # 0..59
-    sign = (base + k) % 12
-    deg30 = ((lon_sid * 60.0) % 30.0)
-    return sign, deg30
-
-def varga_pos_dispatch(varga_n, lon_sid):
-    """varga_n に応じて上の関数へ振り分ける"""
-    if varga_n == 1:   # D1
-        return _sign_index(lon_sid), _deg_in_sign(lon_sid)
-    if varga_n == 3:   return varga_pos_d3(lon_sid)
-    if varga_n == 4:   # D4（簡易：等分×起点=奇数:同/偶数:9th）
-        base = _sign_index(lon_sid); seg=30/4; k=int(_deg_in_sign(lon_sid)//seg)
-        start_add = 0 if (base%2==0) else 8
-        return (base+start_add+k)%12, ((lon_sid*4)%30)
-    if varga_n == 7:   # D7（簡易：等分×起点=奇数:同/偶数:7th）
-        base=_sign_index(lon_sid); seg=30/7; k=int(_deg_in_sign(lon_sid)//seg)
-        start_add = 0 if (base%2==0) else 6
-        return (base+start_add+k)%12, ((lon_sid*7)%30)
-    if varga_n == 9:   return varga_pos_d9(lon_sid)
-    if varga_n == 10:  return varga_pos_d10(lon_sid)
-    if varga_n == 12:  return varga_pos_d12(lon_sid)
-    if varga_n == 16:  return varga_pos_d16(lon_sid)
-    if varga_n == 20:  return varga_pos_d20(lon_sid)
-    if varga_n == 24:  return varga_pos_d24(lon_sid)
-    if varga_n == 30:  return varga_pos_d30(lon_sid)
-    if varga_n == 60:  return varga_pos_d60(lon_sid)
-    # フォールバック：従来の倍角法（合わないVargaがあるので早期に全置換推奨）
+    # 最後の手段：単純倍角
     vlon = (lon_sid * varga_n) % 360.0
     return int(vlon // 30.0), (vlon % 30.0)
 
-# ====== ここから本体の Varga 計算 ======
-
+# ------------------------------------------------------------
+# Varga 計算本体
+# ------------------------------------------------------------
 def get_varga_data(
     jd, varga_factor, is_true_node, lat, lon,
     compact_planet=False, short_sd_keys=False,
@@ -219,20 +205,25 @@ def get_varga_data(
 ):
     key_sign = "sg" if short_sd_keys else "Sign"
     key_deg  = "deg" if short_sd_keys else "Degree"
-    signs_full = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo","Libra","Scorpio",
-                  "Sagittarius","Capricorn","Aquarius","Pisces"]
-    sig = SIG_ABBR if compact_planet else signs_full
+    sig_out  = SIG_ABBR if compact_planet else SIG_FULL
+
     out = {}
 
-    # --- Asc（恒星帯）：tropical ASC - ayanamsha で sidereal ASC → Varga 位置へ ---
+    # ---- Asc tropical→sidereal→Varga ----
     cusps, ascmc = swe.houses_ex(jd, lat, lon, b'P')    # tropical Asc
     asc_trop = (ascmc[0] % 360.0)
     ayan = swe.get_ayanamsa_ut(jd)
     asc_sid = (asc_trop - ayan) % 360.0
-    asc_s, asc_d = varga_pos_dispatch(varga_factor, asc_sid)
-    asc_key = PLANET_ABBR.get("Ascendant","Ascendant") if compact_planet else "Ascendant"
-    asc_obj = {key_sign: sig[asc_s], key_deg: round(asc_d, 2)}
-    # D1のみ：ナクシャトラを付与する指定がある場合
+
+    asc_map = _jm_map_varga(asc_sid, varga_factor)
+    if asc_map is None:
+        s_idx, deg30 = _fallback_varga_mapping(asc_sid, varga_factor)
+    else:
+        s_idx, deg30 = asc_map[0], asc_map[1] % 30.0
+
+    asc_obj = {key_sign: sig_out[s_idx], key_deg: deg_to_2dec(deg30)}
+    akey  = PLANET_ABBR.get("Ascendant","Ascendant") if compact_planet else "Ascendant"
+
     if include_nakshatra and varga_factor == 1:
         nk_name_a, nk_pada_a = compute_nakshatra(asc_sid)
         if nak_single:
@@ -240,10 +231,11 @@ def get_varga_data(
         else:
             asc_obj["Nakshatra"] = nk_name_a
             asc_obj["Pada"] = nk_pada_a
-    if asc_first:
-        out[asc_key] = asc_obj
 
-    # --- 惑星群（速度取得は FLG_SPEED を必ず指定） ---
+    if asc_first:
+        out[akey] = asc_obj
+
+    # ---- 惑星群（恒星帯+速度）----
     planets = {
         "Sun": swe.SUN, "Moon": swe.MOON, "Mars": swe.MARS,
         "Mercury": swe.MERCURY, "Jupiter": swe.JUPITER,
@@ -255,17 +247,20 @@ def get_varga_data(
     for name, pid in planets.items():
         res, _ = swe.calc_ut(jd, pid, flags)
         lon_sid = res[0] % 360.0
-        spd     = res[3]  # deg/day
+        spd     = res[3]
 
-        vs, vd = varga_pos_dispatch(varga_factor, lon_sid)
+        mp = _jm_map_varga(lon_sid, varga_factor)
+        if mp is None:
+            s_idx, deg30 = _fallback_varga_mapping(lon_sid, varga_factor)
+        else:
+            s_idx, deg30 = mp[0], mp[1] % 30.0
+
         key_out = PLANET_ABBR.get(name, name) if compact_planet else name
-        base = {key_sign: sig[vs], key_deg: round(vd, 2)}
+        base = {key_sign: sig_out[s_idx], key_deg: deg_to_2dec(deg30)}
 
-        # D1 のみ速度・ナクシャトラ対応
         if varga_factor == 1:
-            # Speed（小数点3桁）
             if include_speed:
-                base["Speed"] = round(spd, 3)
+                base["Speed"] = spd_to_3dec(spd)   # 3桁
             if include_nakshatra:
                 nk_name, nk_pada = compute_nakshatra(lon_sid)
                 if nak_single:
@@ -276,12 +271,17 @@ def get_varga_data(
 
         out[key_out] = base
 
-        # Ketu（Rahu と対向）
+        # --- Ketu（Rahu と対向）---
         if name == "Rahu":
             k_lon_sid = (lon_sid + 180.0) % 360.0
-            ks, kd = varga_pos_dispatch(varga_factor, k_lon_sid)
+            mpk = _jm_map_varga(k_lon_sid, varga_factor)
+            if mpk is None:
+                ks_idx, kdeg30 = _fallback_varga_mapping(k_lon_sid, varga_factor)
+            else:
+                ks_idx, kdeg30 = mpk[0], mpk[1] % 30.0
+
             kkey = PLANET_ABBR.get("Ketu","Ketu") if compact_planet else "Ketu"
-            base_k = {key_sign: sig[ks], key_deg: round(kd, 2)}
+            base_k = {key_sign: sig_out[ks_idx], key_deg: deg_to_2dec(kdeg30)}
             if varga_factor == 1 and include_speed:
                 base_k["Speed"] = None
             if varga_factor == 1 and include_nakshatra:
@@ -421,77 +421,99 @@ if st.button("AI解析用データを生成", type="primary"):
             jd, 9, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d3:
         charts["D3_Drekkana"] = get_varga_data(
             jd, 3, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d4:
         charts["D4_Chaturthamsa"] = get_varga_data(
             jd, 4, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d7:
         charts["D7_Saptamsa"] = get_varga_data(
             jd, 7, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d10:
         charts["D10_Dasamsa"] = get_varga_data(
             jd, 10, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d12:
         charts["D12_Dwadasamsa"] = get_varga_data(
             jd, 12, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d16:
         charts["D16_Shodasamsa"] = get_varga_data(
             jd, 16, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d20:
         charts["D20_Vimsamsa"] = get_varga_data(
             jd, 20, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d24:
         charts["D24_Chaturvimsamsa"] = get_varga_data(
             jd, 24, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d30:
         charts["D30_Trimsamsa"] = get_varga_data(
             jd, 30, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
     if d60:
         charts["D60_Shashtyamsa"] = get_varga_data(
             jd, 60, is_true_node, lat, lon,
             compact_planet=use_compact_planet,
             short_sd_keys=use_short_sd,
-            include_speed=False, include_nakshatra=False, asc_first=True
+            include_speed=False,
+            include_nakshatra=False,
+            asc_first=True
         )
 
     node_value_for_json = "True" if is_true_node else "Mean"
@@ -525,4 +547,4 @@ if st.button("AI解析用データを生成", type="primary"):
         mime="application/json",
     )
 
-    st.success("JSONをコピーするか、ダウンロードしてください。")
+    st.success(f"生成完了（外部Vargaエンジン読み込み: {HAS_JM}）")
