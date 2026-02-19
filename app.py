@@ -18,11 +18,14 @@ PLANET_ABBR = {
 SIG_ABBR = ["Ari","Tau","Gem","Can","Leo","Vir","Lib","Sco","Sag","Cap","Aqu","Pis"]
 
 def map_gender_to_en(g):
+    if g == "不明":
+        return "unknown"
     if g == "男性":
         return "male"
     if g == "女性":
         return "female"
-    return "unknown"
+    if g == "その他":
+        return "other"
 
 # ------------------------------------------------------------
 # Varga 計算部分
@@ -85,34 +88,39 @@ st.header("1. 出生情報の入力")
 
 with st.container(border=True):
 
-    col_name, col_gen = st.columns(2)
-    with col_name:
+    # 名前・性別（横幅を抑えるため3カラム）
+    c1, c2, c3 = st.columns([2, 1.5, 1.5])
+    with c1:
         user_name = st.text_input("名前", value="Guest")
-    with col_gen:
+    with c2:
         gender = st.selectbox("性別（表示は日本語・出力は英語）",
                               ["不明","男性","女性","その他"])
 
-    birth_date = st.date_input("出生日", value=date(1990,1,1),
-                               min_value=date(1900,1,1))
-
-    st.write("出生時刻（ドロップダウン）")
-    col_h, col_m, col_s = st.columns(3)
-    with col_h:
+    # 出生日＋時刻（1行）
+    st.write("出生日・時刻")
+    d1, d2, d3, d4 = st.columns([1.8, 1, 1, 1])
+    with d1:
+        birth_date = st.date_input(
+            "出生日",
+            value=date(1990,1,1),
+            min_value=date(1900,1,1)
+        )
+    with d2:
         h = st.selectbox("時", list(range(0,24)), index=12)
-    with col_m:
+    with d3:
         m = st.selectbox("分", list(range(0,60)), index=0)
-    with col_s:
+    with d4:
         s = st.selectbox("秒", list(range(0,60)), index=0)
 
-    st.write("出生地（緯度・経度手入力）")
-    col_lat, col_lon = st.columns(2)
-    with col_lat:
-        lat = st.number_input("緯度（北緯+ / 南緯-）", value=35.000000, format="%.6f")
-    with col_lon:
-        lon = st.number_input("経度（東経+ / 西経-）", value=135.000000, format="%.6f")
-
-    tz = st.number_input("UTCオフセット（例：日本=+9.0）", 
-                         value=9.0, step=0.5, format="%.1f")
+    # 緯度・経度・UTC offset（1行）
+    st.write("出生地（緯度・経度・UTCオフセット）")
+    g1, g2, g3 = st.columns([1, 1, 1])
+    with g1:
+        lat = st.number_input("緯度（北緯+／南緯-）", value=35.000000, format="%.6f")
+    with g2:
+        lon = st.number_input("経度（東経+／西経-）", value=135.000000, format="%.6f")
+    with g3:
+        tz = st.number_input("UTCオフセット", value=9.0, step=0.5, format="%.1f")
 
 # ------------------------------------------------------------
 # 2. 出力方法の設定
