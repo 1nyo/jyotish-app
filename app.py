@@ -88,14 +88,14 @@ def to_json(obj, minify=True):
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
 # ------------------------------------------------------------
-# 1. 出生情報の入力（コンパクトな一行レイアウト）
+# 1. 出生情報の入力（コンパクト一行レイアウト）
 # ------------------------------------------------------------
 st.header("1. 出生情報の入力")
 
 with st.container(border=True):
 
     # 名前・性別
-    c1, c2, c3 = st.columns([2, 1.5, 1.5])
+    c1, c2, _ = st.columns([2, 1.5, 0.5])
     with c1:
         user_name = st.text_input("名前", value="Guest")
     with c2:
@@ -125,7 +125,7 @@ with st.container(border=True):
         tz = st.number_input("UTCオフセット", value=9.0, step=0.5, format="%.1f")
 
 # ------------------------------------------------------------
-# 2. 出力方法の設定（分割図の並び順：D1, D9, D3, D4, D7, D10, D12, D16, D20, D24, D30, D60）
+# 2. 出力方法の設定（順序：D1, D9, D3, D4, D7, D10, D12, D16, D20, D24, D30, D60）
 # ------------------------------------------------------------
 st.header("2. 出力方法の設定")
 with st.expander("クリックで展開", expanded=False):
@@ -255,4 +255,3 @@ if st.button("AI解析用データを生成", type="primary"):
     )
 
     st.success("JSONをコピーするか、ダウンロードしてください。")
-``
