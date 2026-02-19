@@ -88,12 +88,12 @@ st.header("1. 出生情報の入力")
 
 with st.container(border=True):
 
-    # 名前・性別（横幅を抑えるため3カラム）
+    # 名前・性別
     c1, c2, c3 = st.columns([2, 1.5, 1.5])
     with c1:
         user_name = st.text_input("名前", value="Guest")
     with c2:
-        gender = st.selectbox("性別（表示は日本語・出力は英語）",
+        gender = st.selectbox("性別",
                               ["不明","男性","女性","その他"])
 
     # 出生日＋時刻（1行）
