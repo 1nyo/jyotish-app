@@ -6,19 +6,21 @@
 # - Varga計算は third_party/jyotishyamitra/mod_divisional.py を最優先（JH互換）
 # - フォールバック計算も内蔵（非常用）
 
+import os
+import sys
+import json
+import importlib.util
+from pathlib import Path
+from datetime import date
+
 import streamlit as st
 import swisseph as swe
-import json
-from datetime import date
 
 # ------------------------------------------------------------
 # ページ設定
 # ------------------------------------------------------------
 st.set_page_config(page_title="AI Jyotish Data Generator", layout="wide")
 st.title("🌌 AI専用ヴェーダ占星術データ抽出（JH互換 Varga）")
-
-import os
-from pathlib import Path
 
 st.caption(f"cwd={os.getcwd()}")
 st.caption(f"exists(third_party)={Path('third_party').exists()}")
@@ -27,16 +29,12 @@ st.caption(f"exists(mod)={Path('third_party/jyotishyamitra/mod_divisional.py').e
 # ------------------------------------------------------------
 # 外部 Varga エンジン（jyotishyamitra）読み込み（パッケージ→直読みの順で試行）
 # ------------------------------------------------------------
-import importlib.util
-from pathlib import Path
-import sys
-
 HAS_JM = False
 dv = None
 
-# ① パッケージ読み込みを試す
+# ① 直下 vendoring を最優先
 try:
-    from third_party.jyotishyamitra import mod_divisional as dv
+    from third_party.jyotishyamitra import mod_divisional as dv  # type: ignore
     HAS_JM = True
 except Exception:
     HAS_JM = False
@@ -44,7 +42,7 @@ except Exception:
 # ② 失敗時：app.py の場所から絶対パス指定で直読み
 if not HAS_JM:
     try:
-        base_dir = Path(__file__).resolve().parent  # app.py があるディレクトリ
+        base_dir = Path(__file__).resolve().parent
         mod_path = base_dir / "third_party" / "jyotishyamitra" / "mod_divisional.py"
         if mod_path.exists():
             spec = importlib.util.spec_from_file_location("jm_mod_divisional", str(mod_path))
@@ -55,7 +53,7 @@ if not HAS_JM:
     except Exception:
         HAS_JM = False
 
-# デバッグ表示（成否とどこから読んだかが分かる）
+# デバッグ表示（成否）
 if HAS_JM and dv is not None:
     st.caption(f"[JM] loaded: {getattr(dv, '__file__', 'unknown')}")
 else:
@@ -70,8 +68,10 @@ PLANET_ABBR = {
     "Rahu": "Ra", "Ketu": "Ke", "Ascendant": "Asc"
 }
 
-SIG_FULL = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo",
-            "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
+SIG_FULL = [
+    "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
+    "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
+]
 SIG_ABBR = ["Ari","Tau","Gem","Can","Leo","Vir","Lib","Sco","Sag","Cap","Aqu","Pis"]
 
 _SIG_INDEX = {name.lower(): i for i, name in enumerate(SIG_FULL)}
@@ -90,10 +90,16 @@ def normalize_sign_to_index(sign):
     return None
 
 def deg_to_2dec(x):  # 角度は 2 桁
-    return round(float(x), 2)
+    try:
+        return round(float(x), 2)
+    except Exception:
+        return None
 
 def spd_to_3dec(x):  # Speed は 3 桁
-    return round(float(x), 3)
+    try:
+        return round(float(x), 3)
+    except Exception:
+        return None
 
 def map_gender_to_en(g):
     if g == "男性": return "male"
@@ -148,7 +154,7 @@ def _jm_map_varga(lon_sid: float, varga_n: int):
         return None
     try:
         if hasattr(dv, "get_divisional_sign_and_degree"):
-            out = dv.get_divisional_sign_and_degree(lon_sid, varga_n)
+            out = dv.get_divisional_sign_and_degree(lon_sid, varga_n)  # type: ignore
             # 期待形式: (sign, deg) — sign は 0..11 / 1..12 / 'Aries' / 'Ari' のいずれか
             if isinstance(out, (tuple, list)) and len(out) >= 2:
                 s_idx = normalize_sign_to_index(out[0])
@@ -183,7 +189,7 @@ def _fallback_varga_mapping(lon_sid: float, varga_n: int):
     # D9: 可動=同, 固定=9th, 双体=5th
     if varga_n == 9:
         modality = base % 3
-        start_add = {0:0,1:8,2:4}[modality]
+        start_add = {0:0, 1:8, 2:4}[modality]
         return d_equal(30.0/9.0, start_add)
 
     # D10: 奇数=同 / 偶数=9th（index 偶数を奇数サインとみなす実装）
@@ -194,7 +200,7 @@ def _fallback_varga_mapping(lon_sid: float, varga_n: int):
     # D20: 可動=Ar, 固定=Sag, 双体=Leo 起点
     if varga_n == 20:
         k = int(xdeg // (30.0/20.0))
-        starts = {0:0,1:8,2:4}
+        starts = {0:0, 1:8, 2:4}
         modality = base % 3
         s = (starts[modality] + k) % 12
         deg30 = (lon_sid * 20.0) % 30.0
@@ -242,7 +248,8 @@ def get_varga_data(
     out = {}
 
     # ---- Asc tropical→sidereal→Varga ----
-    cusps, ascmc = swe.houses_ex(jd, lat, lon, b'P')    # tropical Asc
+    # houses_ex: returns (cusps, ascmc). ascmc[0] is Asc in tropical
+    cusps, ascmc = swe.houses_ex(jd, lat, lon, b'P')
     asc_trop = (ascmc[0] % 360.0)
     ayan = swe.get_ayanamsa_ut(jd)
     asc_sid = (asc_trop - ayan) % 360.0
@@ -348,15 +355,15 @@ with st.container(border=True):
 
     # 出生日＋時刻（1行）
     st.write("出生日・時刻")
-    d1, d2, d3, d4 = st.columns([1.8, 1, 1, 1])
-    with d1:
+    d1c, d2c, d3c, d4c = st.columns([1.8, 1, 1, 1])
+    with d1c:
         birth_date = st.date_input("出生日", value=date(1990,1,1),
                                    min_value=date(1900,1,1))
-    with d2:
+    with d2c:
         h = st.selectbox("時", list(range(0,24)), index=12)
-    with d3:
+    with d3c:
         m = st.selectbox("分", list(range(0,60)), index=0)
-    with d4:
+    with d4c:
         s = st.selectbox("秒", list(range(0,60)), index=0)
 
     # 緯度・経度・UTC offset（1行）
