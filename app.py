@@ -99,7 +99,12 @@ with st.container(border=True):
     st.write("出生日・時刻（24時間制）")
     d1c, d2c, d3c, d4c = st.columns([1.8, 1, 1, 1])
     with d1c:
-        birth_date = st.date_input("出生日", value=date(1990, 1, 1))
+        birth_date = st.date_input("出生日",
+        value=date(1990, 1, 1),
+        min_value=date(1, 1, 1),
+        max_value=date(2999, 12, 31),
+        help="※ 年の範囲を 0001–2999 に拡大（BCE が必要ならテキスト入力に切替可能）",
+        )
     with d2c:
         h = st.selectbox("時", list(range(0, 24)), index=12)
     with d3c:
@@ -212,6 +217,85 @@ def _sanitize_filename(text: str) -> str:
 def _yyyymmdd(d: date) -> str:
     return f"{d.year:04d}{d.month:02d}{d.day:02d}"
 
+# === JSON プレビュー専用：配列を 1 行化＆小辞書を 1 行化する整形 ===
+import json
+
+def pretty_json_inline_lists(
+    obj,
+    indent: int = 2,
+    inline_small_dict_max_items: int = 2,
+    inline_list_max_len: int = 20
+) -> str:
+    """
+    JSON を「読みやすさ + インライン最適化」方針で整形して文字列で返す。
+    - リスト: 可能な限り 1 行 "[a, b]" にする
+    - 小さな辞書: キー数 <= inline_small_dict_max_items かつ
+      値がスカラー or 小さなリストのみの場合に 1 行 "{k: v, k2: v2}" にする
+    """
+    def is_scalar(x):
+        return x is None or isinstance(x, (str, int, float, bool))
+
+    def list_to_inline(a_list):
+        parts = []
+        for v in a_list:
+            if is_scalar(v):
+                parts.append(json.dumps(v, ensure_ascii=False))
+            elif isinstance(v, list):
+                parts.append(list_to_inline(v))
+            elif isinstance(v, dict):
+                parts.append(dict_to_maybe_inline(v, 0, force_inline=True))
+            else:
+                parts.append(json.dumps(v, ensure_ascii=False))
+        return "[" + ", ".join(parts) + "]"
+
+    def dict_to_maybe_inline(d: dict, level: int, force_inline: bool = False) -> str:
+        kv_items = list(d.items())
+        if force_inline or (
+            len(kv_items) <= inline_small_dict_max_items and all(
+                is_scalar(v) or (
+                    isinstance(v, list) and len(v) <= inline_list_max_len and all(is_scalar(x) for x in v)
+                )
+                for _, v in kv_items
+            )
+        ):
+            inner = ", ".join(
+                json.dumps(k, ensure_ascii=False) + ": " +
+                (
+                    list_to_inline(v) if isinstance(v, list)
+                    else json.dumps(v, ensure_ascii=False)
+                )
+                for k, v in kv_items
+            )
+            return "{" + inner + "}"
+
+        pad = " " * (indent * level)
+        pad_in = " " * (indent * (level + 1))
+        lines = ["{"]
+        for i, (k, v) in enumerate(kv_items):
+            key_part = json.dumps(k, ensure_ascii=False) + ": "
+            if is_scalar(v):
+                val_part = json.dumps(v, ensure_ascii=False)
+                lines.append(pad_in + key_part + val_part + ("," if i < len(kv_items) - 1 else ""))
+            elif isinstance(v, list):
+                val_part = list_to_inline(v)
+                lines.append(pad_in + key_part + val_part + ("," if i < len(kv_items) - 1 else ""))
+            elif isinstance(v, dict):
+                val_part = dict_to_maybe_inline(v, level + 1)
+                lines.append(pad_in + key_part + val_part + ("," if i < len(kv_items) - 1 else ""))
+            else:
+                val_part = json.dumps(v, ensure_ascii=False)
+                lines.append(pad_in + key_part + val_part + ("," if i < len(kv_items) - 1 else ""))
+        lines.append(pad + "}")
+        return "\n".join(lines)
+
+    if is_scalar(obj):
+        return json.dumps(obj, ensure_ascii=False)
+    if isinstance(obj, list):
+        return list_to_inline(obj)
+    if isinstance(obj, dict):
+        return dict_to_maybe_inline(obj, level=0)
+    return json.dumps(obj, ensure_ascii=False, indent=indent, separators=(", ", ": "))
+
 if go:
     # 5-1) Ephemeris 初期化（キャッシュ済み）
     inited = init_ephemeris(ephe_path, "Lahiri_ICRC")
@@ -277,13 +361,13 @@ if go:
     out.update(vargas)
     out = prune_and_validate(out)
 
-    # 5-8) プレビュー用（整形あり）とダウンロード用（最小化）を両方生成
-    txt_pretty = json.dumps(out, ensure_ascii=False, indent=2)
+    # 5-8) プレビュー用（整形あり：配列は 1 行／小さな辞書は 1 行）とダウンロード用（最小化）を生成
+    txt_pretty = pretty_json_inline_lists(out, indent=2, inline_small_dict_max_items=3)
     txt_min = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
 
     # 5-9) 可読プレビュー表示（スクロール可）
     st.subheader("プレビュー（整形済みJSON）")
-    st.code(txt_pretty, language="json")
+    st.code(txt_pretty, language="json")  # st.json は内部整形が入るため st.code を使用
 
     # 5-10) ダウンロードボタン（最小化JSONを保存）
     fname_base = _sanitize_filename(user_name) + "_" + _yyyymmdd(birth_date)
