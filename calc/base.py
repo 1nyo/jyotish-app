@@ -5,15 +5,23 @@ from typing import Dict, Tuple
 SIGNS = ["Ar","Ta","Ge","Cn","Le","Vi","Li","Sc","Sg","Cp","Aq","Pi"]
 SIGN_INDEX = {s:i for i,s in enumerate(SIGNS)}
 
-# 4-letter Nakshatra codes (per user pref; Ashlesha -> 'Asre')
-NAK_CODES = [
-    "Ashv","Bhar","Krit","Rohi","Mrig","Ardr","Puna","Push","Asre",
-    "Magh","PPha","UPha","Hast","Chit","Swat","Vish","Anur","Jyes",
-    "Mula","PAsh","UAsh","Shra","Dhan","Sata","PBha","UBha","Reva",
+# calc/base.py（ナクシャトラ周辺のみ）
+NAK_LABELS_JH = [
+    "Ashwini","Bharani","Krittika","Rohini","Mrigashira","Ardra","Punarvasu",
+    "Pushya","Ashlesha","Magha","Purva Phalguni","Uttara Phalguni","Hasta",
+    "Chitra","Swati","Vishakha","Anuradha","Jyeshtha","Mula",
+    "Purva Ashadha","Uttara Ashadha","Shravana","Dhanishta","Shatabhisha",
+    "Purva Bhadrapada","Uttara Bhadrapada","Revati",
 ]
+NAK_SIZE = 13 + 20/60   # 13°20′ per nakshatra
+PADA_SIZE = 3 + 20/60   # 3°20′ per pada
 
-NAK_SIZE = 13 + 20/60      # 13°20'
-PADA_SIZE = 3 + 20/60      # 3°20'
+def nakshatra_pada(lon: float, labels=NAK_LABELS_JH):
+    pos = norm360(lon)
+    nak_index = int(pos // NAK_SIZE) % 27
+    rem = pos - nak_index * NAK_SIZE
+    pada = int(rem // PADA_SIZE) + 1
+    return labels[nak_index], pada
 
 EXALTATION_SIGN = {
     "Su":"Ar","Mo":"Ta","Ma":"Cp","Me":"Vi","Ju":"Cn","Ve":"Pi","Sa":"Li"
