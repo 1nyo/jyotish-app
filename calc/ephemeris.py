@@ -21,10 +21,21 @@ def ayanamsa_deg(jd_ut: float) -> float:
 def _norm360(x: float) -> float:
     return x % 360.0
 
+# calc/ephemeris.py（asc_sidereal を置き換え）
 def asc_sidereal(jd_ut: float, lat: float, lon: float) -> float:
-    # サイデリアル Whole Sign の Asc を取得
-    # → FLG_SIDEREAL（E が2つ）、ハウス方式は 'W'
-    _, ascmc = swe.houses_ex(jd_ut, swe.FLG_SIDEREAL, lat, lon, 'W')
+    """
+    サイデリアル Whole Sign の Asc を取得。
+    pyswisseph の houses_ex は実装差があり、以下2通りを試す：
+    1) houses_ex(jd, lat, lon, hsys[, iflag])   ← Python拡張で一般的
+    2) houses_ex(jd, iflag, lat, lon, hsys)    ← 一部のバインディング
+    """
+    hsys = b"W"
+    try:
+        # パターン1：jd, lat, lon, hsys, iflag
+        _, ascmc = swe.houses_ex(jd_ut, lat, lon, hsys, swe.FLG_SIDEREAL)
+    except TypeError:
+        # パターン2：jd, iflag, lat, lon, hsys
+        _, ascmc = swe.houses_ex(jd_ut, swe.FLG_SIDEREAL, lat, lon, hsys)
     return _norm360(ascmc[0])  # Asc
 
 def planet_sidereal_longitudes(
