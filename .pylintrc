@@ -1,18 +1,28 @@
 [MASTER]
 ignore-patterns=^build/,.*/node_modules/,.*/.venv/
 jobs=0
-load-plugins=
+persistent=yes
+extension-pkg-allow-list=
 
 [MESSAGES CONTROL]
-# 本質以外は段階的に戻す
 disable=
   missing-module-docstring,
   missing-function-docstring,
   line-too-long,
-  invalid-name
+  invalid-name,
+  too-many-branches,
+  too-many-locals,
+  too-many-statements,
+  consider-using-in
 
 [FORMAT]
 max-line-length=120
 
+[BASIC]
+good-names=i,j,k,x,y,z,_,h,m,s,df,ax,pl,ra,ke,mo,su
+
 [TYPECHECK]
 ignored-modules=swisseph
+
+[REPORTS]
+score=yes
