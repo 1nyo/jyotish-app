@@ -1,32 +1,55 @@
-# -*- coding: utf-8 -*-
-import os
+# app.py
 import json
-from datetime import date, datetime, time
+from datetime import date, datetime
 import streamlit as st
-import requests
+import swisseph as swe
 
-# ============================================
-# 設定
-# ============================================
-st.set_page_config(page_title="Jyotish Data Generator for AI", page_icon="🪷", layout="centered")
-st.title("AI専用ヴェーダ占星術データ抽出ツール")
+# ---- calc modules ----
+from calc.ephemeris import setup_sidereal, jd_ut_from_local, ayanamsa_deg, asc_sidereal, planet_sidereal_longitudes
+from calc.d1 import build_d1
+from calc.d9 import build_d9
+from calc.d20 import build_d20
+from calc.d60 import build_d60
+from calc.validators import prune_and_validate
 
-# APIベースURL（例：Streamlit Secrets または環境変数）
-API_BASE = st.secrets.get("JYOTISH_API_BASE", os.getenv("JYOTISH_API_BASE", "http://localhost:9393"))
+# ----------------------
+# Helpers
+# ----------------------
+def format_tz(tz: float) -> str:
+    # "UTC+9" / "UTC-5.5"
+    sgn = "+" if tz >= 0 else "-"
+    val = abs(tz)
+    if abs(val - int(val)) < 1e-9:
+        return f"UTC{sgn}{int(val)}"
+    return f"UTC{sgn}{val:.1f}"
 
-# 短縮表記マップ
-PLANET_SHORT = {
-    "Sun":"Su","Moon":"Mo","Mars":"Ma","Mercury":"Me","Jupiter":"Ju","Venus":"Ve","Saturn":"Sa","Rahu":"Ra","Ketu":"Ke",
-    # APIが既に Su,Mo… ならそのまま通す
-}
-SIGN_NAMES = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo","Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
-SIGN_SHORT = {"Aries":"Ari","Taurus":"Tau","Gemini":"Gem","Cancer":"Can","Leo":"Leo","Virgo":"Vir",
-              "Libra":"Lib","Scorpio":"Sco","Sagittarius":"Sag","Capricorn":"Cap","Aquarius":"Aqu","Pisces":"Pis"}
+def deg_to_dms_str(deg: float, always_sign_minus=False) -> str:
+    # 23.565 -> "-23:33:54"
+    d = abs(deg)
+    D = int(d)
+    m_f = (d - D) * 60
+    M = int(m_f)
+    S = int(round((m_f - M) * 60))
+    if S == 60:
+        S = 0
+        M += 1
+    if M == 60:
+        M = 0
+        D += 1
+    prefix = "-" if always_sign_minus else ""
+    return f"{prefix}{D:02d}:{M:02d}:{S:02d}"
 
-def sign_id_to_name(rashi_id:int) -> str:
-    # jyotish-api の rashi は 1..12 想定。0/None ガードも付与
-    idx = max(1, min(12, int(rashi_id))) - 1
-    return SIGN_NAMES[idx]
+def safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+# ----------------------
+# Streamlit UI
+# ----------------------
+st.set_page_config(page_title="AI用 Jyotish データ作成ツール", layout="wide")
+st.title("AI用 Jyotish データ作成ツール")
 
 # ============================================
 # 1. 出生情報の入力
@@ -36,8 +59,9 @@ with st.container(border=True):
     c1, c2 = st.columns([1.5, 1])
     with c1:
         user_name = st.text_input("名前", value="Guest")
+        location_label = st.text_input("出生地（任意ラベル）", value="Unknown")
     with c2:
-        gender = st.selectbox("性別", ["不明","男性","女性","その他"])
+        gender = st.selectbox("性別", ["不明","男性","女性","その他"], index=0)
 
     # 日付・時刻
     st.write("出生日・時刻（24時間制）")
@@ -66,183 +90,128 @@ with st.container(border=True):
 # ============================================
 st.header("2. 出力方法の設定")
 with st.expander("クリックで展開", expanded=True):
-    col_op1, col_op2 = st.columns(2)
-
-    with col_op1:
-        node_ui = st.radio(
-            "ノードの計算",
-            ["Mean Node (平均)", "True Node (真位置)"],
-            horizontal=True
-        )
-        node_mode = "true" if node_ui.startswith("True") else "mean"
-
-        use_compact_planet = st.checkbox("惑星キー・サイン名を短縮（Sun→Su, Aries→Ari）", value=True)
-        use_short_sd = st.checkbox("House/Sign/Degree キーも短縮（h/sg/deg）", value=True)
-        minify_json = st.checkbox("出力するJSONを最小化（スペース・改行なし）", value=True)
-
-    with col_op2:
-        st.write("出力する分割図（複数選択）")
-        d1  = st.checkbox("D1 Rashi（基本）", value=True)
-        d9  = st.checkbox("D9 Navamsa（配偶者・ダルマ）", value=True)
-        d3  = st.checkbox("D3 Drekkana（兄弟姉妹）", value=False)
-        d4  = st.checkbox("D4 Chaturthamsa（住居・運）", value=False)
-        d7  = st.checkbox("D7 Saptamsa（子供・孫）", value=False)
-        d10 = st.checkbox("D10 Dasamsa（職業・達成）", value=False)
-        d12 = st.checkbox("D12 Dwadasamsa（両親）", value=False)
-        d16 = st.checkbox("D16 Shodasamsa（乗り物）", value=False)
-        d20 = st.checkbox("D20 Vimsamsa（霊性・宗教性）", value=False)
-        d24 = st.checkbox("D24 Chaturvimsamsa（教育・知識）", value=False)
-        d30 = st.checkbox("D30 Trimsamsa（困難・試練）", value=False)
-        d60 = st.checkbox("D60 Shashtyamsa（すべて）", value=False)
+    col1, col2, col3 = st.columns([1,1,1])
+    with col1:
+        node_type = st.radio("ノードの計算", ["True Node（真）","Mean Node（平均）"], index=0)
+        ck_mode = st.radio("Chara Karaka", ["7（Rahu除外）","8（Rahu含む）"], index=0)
+        include_lordship = st.checkbox("支配関係を出力に含む", value=True)
+    with col2:
+        include_d1 = st.checkbox("D1 Rashi（基本）", value=True)
+        include_d9 = st.checkbox("D9 Navamsa（本質層）", value=True)
+        include_d20 = st.checkbox("D20 Vimsamsa（精神性、宗教）", value=False)
+        include_d60 = st.checkbox("D60 Shashtyamsa（深層カルマ）", value=False)
+    with col3:
+        minimize = st.checkbox("出力するJSONを最小化（スペース・改行なし）", value=True)
+        ephe_path = st.text_input("Swiss Ephemeris ファイルパス（空で内蔵）", value="")
 
 # 送信ボタン
-if st.button("AI向けJSONを生成", type="primary"):
-    # --- varga パラメータ生成 ---
-    vargas = []
-    for key, flag in [("D1", d1), ("D3", d3), ("D4", d4), ("D7", d7), ("D9", d9), ("D10", d10),
-                      ("D12", d12), ("D16", d16), ("D20", d20), ("D24", d24), ("D30", d30), ("D60", d60)]:
-        if flag:
-            vargas.append(key)
-    if not vargas:
-        vargas = ["D1"]
-    varga_str = ",".join(vargas)
+go = st.button("AI向けJSONを生成", type="primary")
 
-    # --- APIパラメータ組み立て ---
-    # jyotish-api は GET /api/calculate をサポート
-    # 例: ?latitude=...&longitude=...&year=...&month=...&day=...&hour=...&min=...&sec=...&time_zone=%2B09:00&varga=D1,D9&infolevel=basic,panchanga
-    dt = datetime.combine(birth_date, time(h, m, s))
-    tz_sign = "+" if tz >= 0 else "-"
-    tz_h = int(abs(tz))
-    tz_m = int(round((abs(tz) - tz_h) * 60))
-    tz_str = f"{tz_sign}{tz_h:02d}:{tz_m:02d}"
+# ============================================
+# 実行
+# ============================================
+if go:
+    # Swiss path
+    try:
+        swe.set_ephe_path(ephe_path if ephe_path.strip() else None)
+    except Exception:
+        swe.set_ephe_path(None)
 
-    params = {
-        "latitude": f"{lat:.6f}",
-        "longitude": f"{lon:.6f}",
-        "year": dt.year,
-        "month": dt.month,
-        "day": dt.day,
-        "hour": dt.hour,
-        "min": dt.minute,
-        "sec": dt.second,
-        "time_zone": tz_str,
-        "dst_hour": 0,
-        "dst_min": 0,
-        "nesting": 0,
-        "varga": varga_str,
-        "infolevel": "basic,panchanga",
-        "node": node_mode,  # ← 追加した改修で Mean/True の切り替え
+    # Sidereal (Lahiri ICRC → fallback Lahiri)
+    setup_sidereal("Lahiri_ICRC")  # ICRC が無ければモジュール内で Lahiri にフォールバック
+
+    # 時刻
+    h_float = int(h) + int(m)/60.0 + int(s)/3600.0
+    jd_ut = jd_ut_from_local(birth_date.year, birth_date.month, birth_date.day, h_float, tz)
+
+    # Asc（サイデリアル, Whole Sign）, 惑星（サイデリアル黄経＋速度）
+    asc = asc_sidereal(jd_ut, lat, lon)
+    node_flag = "True" if node_type.startswith("True") else "Mean"
+    planets = planet_sidereal_longitudes(jd_ut, node_flag)
+
+    # Ayanamsa（Lahiri ICRC の値を表示用に）
+    aya = ayanamsa_deg(jd_ut)  # degrees
+    aya_str = deg_to_dms_str(aya, always_sign_minus=True)  # "-23:33:56" 風
+
+    # meta
+    meta = {
+        "name": user_name,
+        "birth": f"{birth_date.isoformat()} {int(h):02d}:{int(m):02d}",
+        "timezone": format_tz(tz),
+        "latitude": f"{lat:.2f}",
+        "longitude": f"{lon:.2f}",
+        "location": location_label,
+        "ayanamsa": f"Lahiri ICRC {aya_str}",
+        "calculation_model": "Drik Siddhanta",
+        "node_type": "True" if node_flag == "True" else "Mean",
+        "house_system": "Whole Sign"
     }
 
-    # --- API呼び出し ---
-    try:
-        url = f"{API_BASE}/api/calculate"
-        res = requests.get(url, params=params, timeout=40)
-        res.raise_for_status()
-        raw = res.json()  # APIのネイティブ応答
+    # オプション
+    opts = {
+        "ck_mode": "8" if ck_mode.startswith("8") else "7",
+        "include_lordship": include_lordship
+    }
 
-        # --- AI向けに再整形（短縮キーや名称付与） ---
-        def compact_chart(api_chart: dict) -> dict:
-            # 惑星・ラグナ・ハウス・varga をAI向けに正規化
-            out = {
-                "meta": {
-                    "name": user_name,
-                    "gender": gender,
-                    "tz": tz_str,
-                    "node": node_mode,      # mean|true
-                    "varga": vargas,
-                },
-                "birth": {
-                    "date": str(birth_date),
-                    "time": f"{h:02d}:{m:02d}:{s:02d}",
-                    "lat": lat, "lon": lon
-                },
-                "D": {}  # 分割図格納: D1, D9, ...
-            }
+    # 構築
+    out = {"meta": meta}
 
-            # ベース（D1相当）
-            def normalize_block(block: dict, use_short=True):
-                # graha: {"Su": {"rashi": 9, "degree": 8.98, ...}, ...}
-                r_g = {}
-                graha = block.get("graha", {})
-                for k, v in graha.items():
-                    # 既に Su/Mo... ならそのまま。フル名が来た場合は短縮へ。
-                    key = PLANET_SHORT.get(k, k) if use_short else k
-                    sg_name = sign_id_to_name(v.get("rashi")) if v.get("rashi") else None
-                    if use_compact_planet and sg_name in SIGN_SHORT:
-                        sg = SIGN_SHORT[sg_name]
-                    else:
-                        sg = sg_name
-                    r_g[key] = {
-                        ("sg" if use_short_sd else "sign"): sg,
-                        ("deg" if use_short_sd else "degree"): v.get("degree"),
-                        ("h" if use_short_sd else "house"): v.get("bhava") if v.get("bhava") else None,
-                        "retro": v.get("retro", None),
-                        "nak": v.get("nakshatra", {}).get("name") if v.get("nakshatra") else None,
-                        "pada": v.get("nakshatra", {}).get("pada") if v.get("nakshatra") else None
-                    }
+    # D1
+    if include_d1:
+        D1 = build_d1(asc, planets, opts)
+    else:
+        D1 = None
 
-                # lagna
-                r_l = {}
-                for lg_key, lg_val in (block.get("lagna") or {}).items():
-                    sg_name = sign_id_to_name(lg_val.get("rashi")) if lg_val.get("rashi") else None
-                    sg = SIGN_SHORT.get(sg_name, sg_name) if use_compact_planet else sg_name
-                    r_l[lg_key] = {
-                        ("sg" if use_short_sd else "sign"): sg,
-                        ("deg" if use_short_sd else "degree"): lg_val.get("degree"),
-                    }
+    # D9
+    if include_d9:
+        D9 = build_d9(asc, planets)
+    else:
+        D9 = None
 
-                # house
-                r_h = {}
-                for num, hv in (block.get("bhava") or {}).items():
-                    sg_name = sign_id_to_name(hv.get("rashi")) if hv.get("rashi") else None
-                    sg = SIGN_SHORT.get(sg_name, sg_name) if use_compact_planet else sg_name
-                    r_h[str(num)] = {
-                        ("sg" if use_short_sd else "sign"): sg,
-                        ("deg" if use_short_sd else "degree"): hv.get("degree"),
-                    }
+    # Karakamsa を D1 に注入（AK の D9 サイン）
+    if D1 is not None and D9 is not None:
+        try:
+            ak = D1.get("jaimini", {}).get("AK")
+            if ak:
+                karakamsa_sign = D9["planets"][ak]["sign"]
+                D1.setdefault("jaimini", {})["karakamsa_sign"] = karakamsa_sign
+        except Exception:
+            pass
 
-                return {"graha": r_g, "lagna": r_l, "house": r_h}
+    if include_d1:
+        out["D1"] = D1
+    if include_d9:
+        out["D9"] = D9
+    if include_d20:
+        out["D20"] = build_d20(asc, planets)
+    if include_d60:
+        out["D60"] = build_d60(asc, planets)
 
-            chart = raw.get("chart", {})
-            # D1
-            out["D"]["D1"] = normalize_block(chart, use_short=True)
-            # varga
-            for vkey, vblock in (chart.get("varga") or {}).items():
-                out["D"][vkey] = normalize_block(vblock, use_short=True)
+    # バリデーション＆null除去
+    out = prune_and_validate(out)
 
-            # panchanga
-            p = chart.get("panchanga") or {}
-            out["panchanga"] = {
-                "tithi": p.get("tithi", {}).get("name"),
-                "nakshatra": p.get("nakshatra", {}).get("name"),
-                "yoga": p.get("yoga", {}).get("name"),
-                "vara": p.get("vara", {}).get("name"),
-                "karana": p.get("karana", {}).get("name"),
-            }
-            return out
+    # 表示
+    if minimize:
+        txt = json.dumps(out, ensure_ascii=False, separators=(',',':'))
+    else:
+        txt = json.dumps(out, ensure_ascii=False, indent=2)
 
-        ai_json = compact_chart(raw.get("chart", {}))
+    st.subheader("生成された JSON")
+    st.code(txt, language="json")
 
-        st.success("計算完了")
-        st.caption("※計算は kunjara/jyotish（Swiss Ephemeris）ベースのAPIを利用しています。")
+    # ダウンロード
+    st.download_button("JSONをダウンロード", data=txt.encode('utf-8'), file_name="jyotish.json", mime="application/json")
 
-        # 表示
-        if minify_json:
-            js = json.dumps(ai_json, ensure_ascii=False, separators=(",", ":"))
-        else:
-            js = json.dumps(ai_json, ensure_ascii=False, indent=2)
-
-        st.code(js, language="json")
-
-        # ダウンロード
-        st.download_button(
-            "JSONをダウンロード",
-            data=js.encode("utf-8"),
-            file_name=f"{user_name}_jyotish_ai.json",
-            mime="application/json",
-            use_container_width=True
+    # 参考メモ
+    with st.expander("計算仕様メモ（参考）", expanded=False):
+        st.markdown(
+            "- **Tithi/Paksha**：太陽−月の地心黄経差を 12° 刻みで区分。1–15＝Shukla、16–30＝Krishna、15＝Purnima、30＝Amavasya。"
+            "（一般的なパンチャーンガの定義）"  # 参考
         )
-
-    except Exception as e:
-        st.error(f"エラーが発生しました: {e}")
+        st.markdown("  出典例：W3HTech Tithi 定義／Freedom Vidya 解説。")  # citations below
+        st.markdown(
+            "- **Whole Sign houses**：Swiss Ephemeris `houses_ex(..., FLG_SIDEREAL, 'W')` を使用。"
+        )
+        st.markdown(
+            "  出典例：Swiss Ephemeris docs（house methods / extended functions）。"
+        )
