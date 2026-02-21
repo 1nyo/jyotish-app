@@ -197,11 +197,20 @@ def build_vargas(
         out["D60"] = build_d60(asc, planets)
     return out
 
+# =======================================================
+# 5) ボタン押下 → 生成（プレビュー後にダウンロード）
+# =======================================================
+go = st.button("AI向けJSONを生成（プレビュー）", type="primary")
 
-# =======================================================
-# 5) ボタン押下 → 生成
-# =======================================================
-go = st.button("AI向けJSONを生成", type="primary")
+def _sanitize_filename(text: str) -> str:
+    # ファイル名に使えない記号をアンダースコアへ
+    import re
+    text = text.strip()
+    text = re.sub(r"[^\w\-]+", "_", text, flags=re.UNICODE)
+    return text or "Guest"
+
+def _yyyymmdd(d: date) -> str:
+    return f"{d.year:04d}{d.month:02d}{d.day:02d}"
 
 if go:
     # 5-1) Ephemeris 初期化（キャッシュ済み）
@@ -224,10 +233,7 @@ if go:
         node_flag,
         inited,  # True
     )
-
-    asc = core["asc"]
-    planets = core["planets"]
-    aya_val = core["ayanamsa"]
+    asc = core["asc"]; planets = core["planets"]; aya_val = core["ayanamsa"]
     aya_str = deg_to_dms_str(aya_val, always_sign_minus=True)
 
     # 5-4) Varga 生成 — キャッシュ
@@ -266,29 +272,33 @@ if go:
         "house_system": "Whole Sign",
     }
 
-    # 5-7) トップレベル JSON まとめ → バリデーション → 表示
+    # 5-7) トップレベル JSON まとめ → バリデーション
     out = {"meta": meta}
     out.update(vargas)
     out = prune_and_validate(out)
 
-    if minimize:
-        txt = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
-    else:
-        txt = json.dumps(out, ensure_ascii=False, indent=2)
+    # 5-8) プレビュー用（整形あり）とダウンロード用（最小化）を両方生成
+    txt_pretty = json.dumps(out, ensure_ascii=False, indent=2)
+    txt_min = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
 
-    st.subheader("生成された JSON")
-    st.code(txt, language="json")
+    # 5-9) 可読プレビュー表示（スクロール可）
+    st.subheader("プレビュー（整形済みJSON）")
+    st.code(txt_pretty, language="json")
+
+    # 5-10) ダウンロードボタン（最小化JSONを保存）
+    fname_base = _sanitize_filename(user_name) + "_" + _yyyymmdd(birth_date)
+    file_name = f"{fname_base}.json"
+
     st.download_button(
-        "JSONをダウンロード",
-        data=txt.encode("utf-8"),
-        file_name="jyotish.json",
+        label=f"最小化JSONをダウンロード（{file_name}）",
+        data=txt_min.encode("utf-8"),
+        file_name=file_name,
         mime="application/json",
+        use_container_width=True
     )
 
+    # 5-11) 参考メモ
     with st.expander("計算仕様メモ（参考）", expanded=False):
         st.markdown(
-            "- **キャッシュ方針**：計算結果（Asc/惑星/分割図）は `@st.cache_data`、"
-            "初期設定（Ephemeris パス/サイデリアル設定）は `@st.cache_resource` を使用。"
-            "（Streamlit 公式の推奨）"  # 参考
+            "- 画面表示は **整形済みJSON**、ダウンロードは **スペース・改行なし**の最小化JSON。"
         )
-        st.markdown("  参考: Streamlit Caching Overview / 新キャッシュAPI（cache_data/resource）")  # citations below
